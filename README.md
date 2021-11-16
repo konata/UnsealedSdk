@@ -1,6 +1,6 @@
 # android-hidden-api-integration
 
-> android.jar[s] with @hide annotation stripped and internal resources | classes merged
+android.jar[s] with @hide annotation stripped and internal resources | classes merged
 
 # to ulitize android hidden api / resources,
 
@@ -10,7 +10,7 @@
 
 ### Or Just
 
-1. include `unseal-hidden.gradle` into your project
+1. paste `unseal-hidden.gradle` into your project
 2. change `designatedCompileSdkVersion` to your compileSdkVersion
 3. run task `unseal` and `restore` from android studio gutter like below
 
