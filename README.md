@@ -12,4 +12,4 @@ Or Just
 2. change `designatedCompileSdkVersion` to your compileSdkVersion
 3. run task `unseal` and `restore` from android studio gutter like below
 
-![run `unseal` and `restore` from gutter](./art/run-from-futter.png)
+![run `unseal` and `restore` from gutter](<./art/run-from-futter.png>)
