@@ -4,11 +4,11 @@
 
 # to ulitize android hidden api / resources,
 
-## you may
+### you may
 
 1. manually replace `$ANDROID_SDK/platforms/$version/android.jar` with files `sdks/android-${version}.jar`
 
-## Or Just
+### Or Just
 
 1. include `unseal-hidden.gradle` into your project
 2. change `designatedCompileSdkVersion` to your compileSdkVersion
