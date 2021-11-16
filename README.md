@@ -10,7 +10,7 @@ android.jar[s] with @hide annotation stripped and internal resources | classes m
 
 ### Or just
 
-1. paste `unseal-hidden.gradle` into your project
+1. paste `unseal-hidden.gradle` contents into your project's `build.gradle`
 2. change `designatedCompileSdkVersion` to your compileSdkVersion
 3. run task `unseal` and `restore` from android studio gutter like below
 
