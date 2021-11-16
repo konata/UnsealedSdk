@@ -4,11 +4,11 @@ android.jar[s] with @hide annotation stripped and internal resources | classes m
 
 # to ulitize android hidden api / resources,
 
-### you may
+### You may
 
 1. manually replace `$ANDROID_SDK/platforms/$version/android.jar` with files `sdks/android-${version}.jar`
 
-### Or Just
+### Or just
 
 1. paste `unseal-hidden.gradle` into your project
 2. change `designatedCompileSdkVersion` to your compileSdkVersion
