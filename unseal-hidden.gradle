@@ -1,0 +1,37 @@
+def designatedCompileSdkVersion = 31
+task unseal() {
+    doLast {
+        def androidHome = System.getenv()["ANDROID_HOME"]
+        def dir = "$androidHome/platforms/android-${designatedCompileSdkVersion}/"
+        def (official, unsealed, using) = (".official .unsealed".split(/\s+/) + "").collect { new File("$dir/android${it}.jar").toPath() }
+        assert Files.exists(using)
+        if (!Files.exists(official)) {
+            println("*** backup `using` to `official` ***")
+            Files.copy(using, official)
+        }
+        if (!Files.exists(unsealed)) {
+            def url = "http://10.117.7.201/natsuki/android-hidden-api-integration/-/raw/master/sdks/android-${designatedCompileSdkVersion}.jar"
+            println("*** download `unsealed` jar ***")
+            unsealed.withOutputStream { disk ->
+                disk << new URL(url).openConnection().inputStream
+            }
+        }
+        Files.delete(using)
+        Files.copy(unsealed, using)
+        println("*** replace `using` with `unsealed` ***")
+        println("*** enjoying unsealed apis: ${designatedCompileSdkVersion} ***")
+    }
+}
+
+task restore() {
+    doLast {
+        def androidHome = System.getenv()["ANDROID_HOME"]
+        def dir = "$androidHome/platforms/android-${designatedCompileSdkVersion}/"
+        def (official, _, using) = (".official .unsealed".split(/\s+/) + "").collect { new File("$dir/android${it}.jar").toPath() }
+        assert Files.exists(official)
+        Files.delete(using)
+        Files.copy(official, using)
+        println("*** replace `using` with `official` ***")
+        println("*** black magic sealed: ${designatedCompileSdkVersion} ***")
+    }
+}
