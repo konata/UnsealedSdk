@@ -2,7 +2,7 @@
 
 android.jar[s] with @hide annotation stripped and internal resources | classes merged
 
-# to ulitize android hidden api / resources,
+# to utilizing android hidden api / resources,
 
 ### You may
 
