@@ -1,4 +1,4 @@
-# android-hidden-api-integration
+# Unsealed SDK
 
 android.jar[s] with @hide annotation stripped and internal resources | classes merged
 
