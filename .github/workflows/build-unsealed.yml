@@ -1,0 +1,66 @@
+name: Build Unsealed SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      api:
+        description: SDK API level, for example 37
+        required: true
+        type: string
+      build:
+        description: Android CI build id for sdk-trunk_staging-userdebug
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: unsealed-sdk-${{ inputs.api }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/workflows/build-unsealed.yml
+            tools/build-unsealed.ts
+            sdks/android-${{ inputs.api }}.jar
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: mkdir -p sdks
+
+      - name: Build jar
+        run: |
+          bun tools/build-unsealed.ts             --api "${{ inputs.api }}"             --build "${{ inputs.build }}"             --out "sdks/android-${{ inputs.api }}.jar"
+
+      - name: Check GitHub file limit
+        run: |
+          size=$(stat -c%s "sdks/android-${{ inputs.api }}.jar")
+          limit=$((100 * 1024 * 1024))
+          echo "jar size: $size bytes"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::sdks/android-${{ inputs.api }}.jar is larger than GitHub's 100 MiB file limit"
+            exit 1
+          fi
+
+      - name: Commit jar
+        run: |
+          if [ -z "$(git status --porcelain -- "sdks/android-${{ inputs.api }}.jar")" ]; then
+            echo "No jar changes"
+            exit 0
+          fi
+
+          git config user.name "lolicon"
+          git config user.email "beriru@qq.com"
+          git add "sdks/android-${{ inputs.api }}.jar"
+          git commit -m "feat: android-${{ inputs.api }} unsealed sdk"
+          git push
