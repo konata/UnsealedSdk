@@ -2,6 +2,7 @@
 // The SDK is located through ANDROID_HOME (ANDROID_SDK_ROOT as fallback), the usual rule.
 
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 def version = "37.0"
 
@@ -25,10 +26,17 @@ task unseal {
             Files.copy(t.jar.toPath(), t.backup.toPath())
             println "*** backed up official jar to ${t.backup} ***"
         }
-        if (!t.unsealed.exists()) {
+        if (!t.unsealed.exists() || t.unsealed.length() == 0) {
             def url = "https://raw.githubusercontent.com/konata/UnsealedSdk/main/sdks/${t.remote}"
             println "*** downloading ${url} ***"
-            t.unsealed.withOutputStream { disk -> disk << new URL(url).openStream() }
+            def part = new File(t.unsealed.parent, "android.unsealed.jar.part")
+            try {
+                part.withOutputStream { disk -> disk << new URL(url).openStream() }
+                Files.move(part.toPath(), t.unsealed.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            } catch (e) {
+                Files.deleteIfExists(part.toPath())
+                throw e
+            }
         }
         Files.delete(t.jar.toPath())
         Files.copy(t.unsealed.toPath(), t.jar.toPath())
