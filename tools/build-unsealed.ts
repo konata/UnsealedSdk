@@ -64,20 +64,36 @@ for (const name of classes) {
   }
 }
 
-// android-all has no minor builds, so a minor release's new classes exist only in the official jar.
-// Fill the ones android-all lacks from it; they stay official stubs, which is all a minor release adds.
+// android-all has no minor builds, so what a minor release adds exists only in the official jar:
+// classes android-all lacks are filled from it whole, and members it added to existing classes are
+// appended to the android-all versions. Both stay at stub level, which is all a minor release adds.
 if (minor > 0) {
   await $`unzip -oq ${official} '*.class' -d ${supplement}`;
   const extra = (await readdir(supplement, { recursive: true }))
     .filter(name => name.endsWith(".class") && !blacklist.some(prefix => name.startsWith(prefix)));
   let filled = 0;
+  let classes = 0;
+  let members = 0;
   for (const name of extra) {
     const target = join(merge, name);
-    if (await Bun.file(target).exists()) continue;
-    await Bun.write(target, await Bun.file(join(supplement, name)).bytes());
-    filled++;
+    const source = await Bun.file(join(supplement, name)).bytes();
+    if (!await Bun.file(target).exists()) {
+      await Bun.write(target, source);
+      filled++;
+      continue;
+    }
+    try {
+      const { merged, added } = supplementMembers(await Bun.file(target).bytes(), source);
+      if (added === 0) continue;
+      await Bun.write(target, merged);
+      classes++;
+      members += added;
+    } catch (cause) {
+      throw new Error(`cannot supplement ${name}`, { cause });
+    }
   }
   console.log(`supplement ${filled} classes new in ${api} from the official jar (stub level only)`);
+  console.log(`supplement ${members} members in ${classes} existing classes from the official jar`);
 }
 
 await rm(output, { force: true });
@@ -267,4 +283,197 @@ function stub(input: Uint8Array) {
     Uint8Array.from(be(classAttributes.length)),
     ...classAttributes,
   ]);
+}
+
+// Adds every field and method the source class declares but the target class lacks. Source constant
+// pool indices are remapped by appending equivalent entries to the target pool, so every existing
+// index stays valid. Appended methods get the stub body stub() writes; appended members keep only
+// the attributes a signature needs (ConstantValue, Exceptions, Signature, MethodParameters,
+// Deprecated, Synthetic) — annotations do not survive the move.
+function supplementMembers(target: Uint8Array, source: Uint8Array) {
+  const sizes: Record<number, number> = { 3: 4, 4: 4, 5: 8, 6: 8, 7: 2, 8: 2, 9: 4, 10: 4, 11: 4, 12: 4, 15: 3, 16: 2, 17: 4, 18: 4, 19: 2, 20: 2 };
+  const flags = { static: 0x0008, native: 0x0100, abstract: 0x0400 };
+  const be = (value: number) => [value >> 8, value & 0xff];
+  const be32 = (value: number) => [value >>> 24, (value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+
+  const parse = (input: Uint8Array) => {
+    const view = new DataView(input.buffer, input.byteOffset, input.byteLength);
+    const u2 = (at: number) => view.getUint16(at);
+    const u4 = (at: number) => view.getUint32(at);
+    const count = u2(8);
+    const offsets: number[] = [];
+    let poolEnd = 10;
+    for (let index = 1; index < count; index++) {
+      const tag = input[poolEnd];
+      const size = tag === 1 ? 2 + u2(poolEnd + 1) : sizes[tag];
+      if (size === undefined) throw new Error(`unknown constant tag ${tag} at #${index}`);
+      offsets[index] = poolEnd;
+      poolEnd += 1 + size;
+      if (tag === 5 || tag === 6) index++;
+    }
+    const decoder = new TextDecoder();
+    const utf = (index: number) => decoder.decode(input.subarray(offsets[index] + 3, offsets[index] + 3 + u2(offsets[index] + 1)));
+    const attributes = (at: number) => {
+      const table: { name: string; nameIndex: number; at: number }[] = [];
+      let cursor = at + 2;
+      for (let left = u2(at); left > 0; left--) {
+        table.push({ name: utf(u2(cursor)), nameIndex: u2(cursor), at: cursor });
+        cursor += 6 + u4(cursor + 2);
+      }
+      return { table, end: cursor };
+    };
+    const section = (at: number) => {
+      const members: { access: number; name: number; descriptor: number; key: string; attrs: { name: string; nameIndex: number; at: number }[] }[] = [];
+      let cursor = at + 2;
+      for (let left = u2(at); left > 0; left--) {
+        const { table, end } = attributes(cursor + 6);
+        members.push({
+          access: u2(cursor), name: u2(cursor + 2), descriptor: u2(cursor + 4),
+          key: `${utf(u2(cursor + 2))}:${utf(u2(cursor + 4))}`, attrs: table,
+        });
+        cursor = end;
+      }
+      return { members, end: cursor };
+    };
+    const interfaces = poolEnd + 6;
+    const fieldsAt = interfaces + 2 + 2 * u2(interfaces);
+    const fields = section(fieldsAt);
+    const methods = section(fields.end);
+    return { u2, u4, count, offsets, poolEnd, utf, fieldsAt, fields, methodsAt: fields.end, methods };
+  };
+
+  const to = parse(target);
+  const from = parse(source);
+
+  const known = new Map<string, number>();
+  to.offsets.forEach((offset, index) => {
+    const tag = target[offset];
+    const key = tag === 1 ? `1:${to.utf(index)}`
+      : tag === 3 || tag === 4 ? `${tag}:${to.u4(offset + 1)}`
+      : tag === 5 || tag === 6 ? `${tag}:${to.u4(offset + 1)}:${to.u4(offset + 5)}`
+      : tag === 7 || tag === 8 ? `${tag}:${to.u2(offset + 1)}`
+      : tag === 9 || tag === 10 || tag === 11 || tag === 12 ? `${tag}:${to.u2(offset + 1)}:${to.u2(offset + 3)}`
+      : undefined;
+    if (key && !known.has(key)) known.set(key, index);
+  });
+
+  const appended: number[] = [];
+  let next = to.count;
+  const intern = (key: string, entry: number[], slots = 1) => {
+    const existing = known.get(key);
+    if (existing !== undefined) return existing;
+    if (next + slots > 0xffff) throw new Error("constant pool overflow");
+    known.set(key, next);
+    appended.push(...entry);
+    const index = next;
+    next += slots;
+    return index;
+  };
+  const utf8 = (value: string) => intern(`1:${value}`, [1, ...be(value.length), ...new TextEncoder().encode(value)]);
+  const classRef = (name: string) => { const nameIndex = utf8(name); return intern(`7:${nameIndex}`, [7, ...be(nameIndex)]); };
+  const string = (value: string) => { const valueIndex = utf8(value); return intern(`8:${valueIndex}`, [8, ...be(valueIndex)]); };
+  const methodRef = (owner: number, name: string, descriptor: string) => {
+    const [nameIndex, descriptorIndex] = [utf8(name), utf8(descriptor)];
+    const signature = intern(`12:${nameIndex}:${descriptorIndex}`, [12, ...be(nameIndex), ...be(descriptorIndex)]);
+    return intern(`10:${owner}:${signature}`, [10, ...be(owner), ...be(signature)]);
+  };
+
+  const remap = (index: number): number => {
+    const at = from.offsets[index];
+    const tag = source[at];
+    switch (tag) {
+      case 1: return utf8(from.utf(index));
+      case 3: case 4: return intern(`${tag}:${from.u4(at + 1)}`, [...source.subarray(at, at + 5)]);
+      case 5: case 6: return intern(`${tag}:${from.u4(at + 1)}:${from.u4(at + 5)}`, [...source.subarray(at, at + 9)], 2);
+      case 7: return classRef(from.utf(from.u2(at + 1)));
+      case 8: return string(from.utf(from.u2(at + 1)));
+      case 12: {
+        const name = utf8(from.utf(from.u2(at + 1)));
+        const descriptor = utf8(from.utf(from.u2(at + 3)));
+        return intern(`12:${name}:${descriptor}`, [12, ...be(name), ...be(descriptor)]);
+      }
+      default: throw new Error(`cannot remap constant tag ${tag}`);
+    }
+  };
+
+  const parent = to.u2(to.poolEnd + 4);
+  let raise: number[] | undefined;
+  let construct: number[] | undefined;
+  const body = (constructor: boolean) => {
+    raise ??= (() => {
+      const exception = classRef("java/lang/RuntimeException");
+      const message = string("Stub!");
+      const init = methodRef(exception, "<init>", "(Ljava/lang/String;)V");
+      return [0xbb, ...be(exception), 0x59, ...(message > 0xff ? [0x13, ...be(message)] : [0x12, message]), 0xb7, ...be(init), 0xbf];
+    })();
+    if (!constructor || parent === 0) return raise;
+    construct ??= [0x2a, 0xb7, ...be(methodRef(parent, "<init>", "()V"))];
+    return [...construct, ...raise];
+  };
+  const slots = (descriptor: string) =>
+    (descriptor.slice(1, descriptor.indexOf(")")).match(/\[*(?:L[^;]*;|.)/g) ?? [])
+      .reduce((sum, type) => sum + (type === "J" || type === "D" ? 2 : 1), 0);
+
+  const carry = (attribute: { name: string; at: number }): number[] | undefined => {
+    const name = utf8(attribute.name);
+    const bodyAt = attribute.at + 6;
+    switch (attribute.name) {
+      case "ConstantValue":
+      case "Signature":
+        return [...be(name), ...be32(2), ...be(remap(from.u2(bodyAt)))];
+      case "Exceptions": {
+        const indices = Array.from({ length: from.u2(bodyAt) }, (_, i) => remap(from.u2(bodyAt + 2 + 2 * i)));
+        return [...be(name), ...be32(2 + 2 * indices.length), ...be(indices.length), ...indices.flatMap(index => be(index))];
+      }
+      case "MethodParameters": {
+        const count = source[bodyAt];
+        const params: number[] = [];
+        for (let i = 0; i < count; i++) {
+          const param = from.u2(bodyAt + 1 + 4 * i);
+          params.push(...be(param === 0 ? 0 : remap(param)), ...be(from.u2(bodyAt + 3 + 4 * i)));
+        }
+        return [...be(name), ...be32(1 + 4 * count), count, ...params];
+      }
+      case "Deprecated":
+      case "Synthetic":
+        return [...be(name), ...be32(0)];
+      default:
+        return undefined;
+    }
+  };
+
+  type Member = ReturnType<typeof parse>["fields"]["members"][number];
+  const memberBytes = (member: Member, isMethod: boolean) => {
+    const attrs = member.attrs.map(carry).filter((attr): attr is number[] => attr !== undefined);
+    if (isMethod && (member.access & (flags.abstract | flags.native)) === 0) {
+      const instructions = body(from.utf(member.name) === "<init>");
+      const locals = slots(from.utf(member.descriptor)) + (member.access & flags.static ? 0 : 1);
+      attrs.push([...be(utf8("Code")), ...be32(12 + instructions.length), ...be(3), ...be(locals), ...be32(instructions.length), ...instructions, 0, 0, 0, 0]);
+    }
+    return [...be(member.access), ...be(remap(member.name)), ...be(remap(member.descriptor)), ...be(attrs.length), ...attrs.flat()];
+  };
+
+  const targetFields = new Set(to.fields.members.map(member => member.key));
+  const targetMethods = new Set(to.methods.members.map(member => member.key));
+  const addedFields = from.fields.members.filter(member => !targetFields.has(member.key));
+  const addedMethods = from.methods.members.filter(member => !targetMethods.has(member.key));
+  const added = addedFields.length + addedMethods.length;
+  if (added === 0) return { merged: target, added };
+
+  const fieldBytes = addedFields.map(member => memberBytes(member, false));
+  const methodBytes = addedMethods.map(member => memberBytes(member, true));
+  const merged = Buffer.concat([
+    Uint8Array.from([...target.subarray(0, 8), ...be(next)]),
+    target.subarray(10, to.poolEnd),
+    Uint8Array.from(appended),
+    target.subarray(to.poolEnd, to.fieldsAt),
+    Uint8Array.from(be(to.fields.members.length + addedFields.length)),
+    target.subarray(to.fieldsAt + 2, to.fields.end),
+    ...fieldBytes.map(bytes => Uint8Array.from(bytes)),
+    Uint8Array.from(be(to.methods.members.length + addedMethods.length)),
+    target.subarray(to.methodsAt + 2, to.methods.end),
+    ...methodBytes.map(bytes => Uint8Array.from(bytes)),
+    target.subarray(to.methods.end),
+  ]);
+  return { merged, added };
 }
