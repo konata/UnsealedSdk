@@ -50,7 +50,10 @@ console.log(`android-all ${version} -> ${androidAllUrl}`);
 const androidAll = await cached(androidAllUrl, (await text(`${androidAllUrl}.sha1`)).trim().split(/\s+/)[0]);
 await checkRelease(androidAll, api);
 
-await $`unzip -oq ${official} -x '*.class' -d ${merge}`;
+// The res PNGs are dropped: linking reads only resources.arsc from the platform jar and records
+// references by id, which the device resolves against its own framework resources — the files
+// themselves are never read (verified: aapt2 link output is byte-identical without them).
+await $`unzip -oq ${official} -x '*.class' 'res/*.png' -d ${merge}`;
 await $`unzip -oq ${official} ${runtime.map(prefix => `${prefix}*`)} -d ${merge}`;
 await $`unzip -oq ${androidAll} '*.class' -x ${blacklist.map(prefix => `${prefix}*`)} -d ${overlay}`;
 

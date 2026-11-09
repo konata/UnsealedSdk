@@ -34,3 +34,4 @@ The SDK is located through `ANDROID_HOME` (with `ANDROID_SDK_ROOT` as fallback).
 - Always keep a backup of the official SDK jar so the platform can be restored cleanly.
 - Only replace the SDK platform matching your project's `compileSdk`.
 - Jars for API 37 and later (including minor releases such as 37.1) are built by the current pipeline; jars for API 36 and earlier are legacy builds kept as-is.
+- The `res/*.png` payloads are not included in the current pipeline's jars: linking only reads `resources.arsc` and resolves resource files on the device, so the PNG bytes are never used.
