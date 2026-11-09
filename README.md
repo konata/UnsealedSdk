@@ -19,11 +19,12 @@ These jars are useful when an Android app needs to compile against framework sym
 
 ### Use the Gradle helper
 
-1. Put `unseal.gradle` in your root project and add `apply from: 'unseal.gradle'` to the root `build.gradle`.
-2. Run the `unseal` task to install the unsealed jar.
-3. Run the `restore` task when you want to put the official SDK jar back.
+1. Put `unseal.gradle` in your project and add `apply from: 'unseal.gradle'` to the `build.gradle`.
+2. Set `version` at the top of `unseal.gradle` to the SDK you want, for example `"37.0"` or `"37.1"`.
+3. Run the `unseal` task to install the unsealed jar.
+4. Run the `restore` task when you want to put the official SDK jar back.
 
-The helper reads `compileSdk` (and `compileSdkMinor` when present) from your `:app` module's android config, so there is no version to set in the script.
+The SDK is located through `ANDROID_HOME` (with `ANDROID_SDK_ROOT` as fallback).
 
 ![Run `unseal` and `restore` from the Android Studio gutter](./art/run-from-gutter.png)
 

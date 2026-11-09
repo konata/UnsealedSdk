@@ -1,83 +1,47 @@
-// Unsealed SDK helper: swap the SDK platform android.jar for the unsealed jar
-// matching :app's compileSdk, or put the official jar back.
-//
-// Put this file in the root project and add `apply from: 'unseal.gradle'` to the
-// root build.gradle (applying it inside :app itself works too). The version is
-// read from :app's android config, so there is nothing to set here. Reading the
-// config tolerates AGP versions with or without compileSdkMinor.
+// Swap the SDK platform android.jar for the unsealed jar of the version below, or put the official jar back.
+// The SDK is located through ANDROID_HOME (ANDROID_SDK_ROOT as fallback), the usual rule.
 
 import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
 
-def unsealedApp = project.findProject(':app') ?: project
+def version = "37.0"
 
-def unsealedRead = { Object target, String name ->
-    try {
-        target.hasProperty(name) ? target."$name" : null
-    } catch (MissingPropertyException ignored) {
-        null
-    }
+def target = {
+    def home = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT")
+    if (!home) throw new GradleException("ANDROID_HOME is not set")
+    def (major, minor) = (version.split(/\./) as List) + ["0"]
+    def dir = major.toInteger() < 37 && minor == "0" ? "android-${major}" : "android-${major}.${minor}"
+    def jar = file("${home}/platforms/${dir}/android.jar")
+    if (!jar.exists()) throw new GradleException("no platform at ${jar.parent}; install it in SDK Manager first")
+    [jar: jar,
+     backup: new File(jar.parent, "android.official.jar"),
+     unsealed: new File(jar.parent, "android.unsealed.jar"),
+     remote: minor == "0" ? "android-${major}.jar" : "android-${major}.${minor}.jar"]
 }
 
-def unsealedTarget = {
-    def android = unsealedApp.extensions.findByName('android')
-    if (android == null) throw new GradleException('UnsealedSdk: :app has no android extension; apply the Android plugin first')
-    def major = unsealedRead(android, 'compileSdk') ?: unsealedRead(android, 'compileSdkVersion')
-    if (major == null) throw new GradleException('UnsealedSdk: :app does not configure compileSdk')
-    def minor = (unsealedRead(android, 'compileSdkMinor') ?: 0) as int
-    major = major as int
-
-    def sdk = unsealedRead(android, 'sdkDirectory')
-    if (sdk == null) {
-        def local = new Properties()
-        def props = rootProject.file('local.properties')
-        if (props.exists()) props.withInputStream { local.load(it) }
-        sdk = local.getProperty('sdk.dir') ?: System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
-    }
-    if (sdk == null) throw new GradleException('UnsealedSdk: cannot locate the Android SDK (sdkDirectory, local.properties sdk.dir, and ANDROID_HOME all missing)')
-
-    // Platform packages are named android-<major> up to 36.0 and android-<major>.<minor> from 37 on (and for every minor).
-    def dir = (major >= 37 || minor > 0) ? "android-${major}.${minor}" : "android-${major}"
-    def jar = Paths.get(sdk.toString(), 'platforms', dir, 'android.jar')
-    if (!Files.exists(jar)) throw new GradleException("UnsealedSdk: no SDK platform at ${jar.parent}; install it in SDK Manager first")
-    def file = minor > 0 ? "android-${major}.${minor}.jar" : "android-${major}.jar"
-    return [jar: jar, file: file, label: "${major}.${minor}"]
-}
-
-tasks.register('unseal') {
-    description = 'Replace the platform android.jar with the unsealed jar matching the compileSdk of :app.'
-    group = 'unsealed'
+task unseal {
     doLast {
-        def target = unsealedTarget()
-        Path using = target.jar
-        Path official = using.resolveSibling('android.official.jar')
-        Path unsealed = using.resolveSibling('android.unsealed.jar')
-        if (!Files.exists(official)) {
-            Files.copy(using, official)
-            println "*** backed up official jar to ${official} ***"
+        def t = target()
+        if (!t.backup.exists()) {
+            Files.copy(t.jar.toPath(), t.backup.toPath())
+            println "*** backed up official jar to ${t.backup} ***"
         }
-        if (!Files.exists(unsealed)) {
-            def url = "https://raw.githubusercontent.com/konata/UnsealedSdk/main/sdks/${target.file}"
+        if (!t.unsealed.exists()) {
+            def url = "https://raw.githubusercontent.com/konata/UnsealedSdk/main/sdks/${t.remote}"
             println "*** downloading ${url} ***"
-            unsealed.withOutputStream { disk -> disk << new URL(url).openConnection().inputStream }
+            t.unsealed.withOutputStream { disk -> disk << new URL(url).openStream() }
         }
-        Files.delete(using)
-        Files.copy(unsealed, using)
-        println "*** unsealed SDK ${target.label} installed ***"
+        Files.delete(t.jar.toPath())
+        Files.copy(t.unsealed.toPath(), t.jar.toPath())
+        println "*** unsealed SDK ${version} installed ***"
     }
 }
 
-tasks.register('restore') {
-    description = 'Put the official android.jar back.'
-    group = 'unsealed'
+task restore {
     doLast {
-        def target = unsealedTarget()
-        Path using = target.jar
-        Path official = using.resolveSibling('android.official.jar')
-        if (!Files.exists(official)) throw new GradleException("UnsealedSdk: no backup at ${official}; run unseal first or reinstall the platform in SDK Manager")
-        Files.deleteIfExists(using)
-        Files.copy(official, using)
-        println "*** official SDK ${target.label} restored ***"
+        def t = target()
+        if (!t.backup.exists()) throw new GradleException("no backup at ${t.backup}; run unseal first or reinstall the platform")
+        Files.delete(t.jar.toPath())
+        Files.copy(t.backup.toPath(), t.jar.toPath())
+        println "*** official SDK ${version} restored ***"
     }
 }
