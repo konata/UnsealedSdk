@@ -1,0 +1,11 @@
+{
+  "name": "unsealed-sdk",
+  "private": true,
+  "scripts": {
+    "ls": "bun unseal.ts ls",
+    "unseal": "bun unseal.ts unseal",
+    "restore": "bun unseal.ts restore",
+    "purge": "bun unseal.ts purge",
+    "man": "bun unseal.ts man"
+  }
+}

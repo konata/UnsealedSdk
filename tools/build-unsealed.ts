@@ -30,8 +30,10 @@ const [major, minor = 0] = api.split(".").map(Number);
 if (!Number.isInteger(major) || major < 37 || !Number.isInteger(minor) || minor < 0) {
   throw new Error(`API ${api} is not supported: this pipeline builds API 37 and later (minor allowed, e.g. 37.1); jars for 36 and earlier are kept as-is`);
 }
+// Platform directories keep the minor from 37 on (android-37.0), so the jar does too.
+const name = `${major}.${minor}`;
 
-const output = resolve(values.out ?? `sdks/android-${api}.jar`);
+const output = resolve(values.out ?? `sdks/android-${name}.jar`);
 const cache = resolve(".unsealed-sdk/cache");
 const work = resolve(`.unsealed-sdk/android-${api}`);
 const merge = `${work}/merge`;
@@ -126,7 +128,10 @@ async function cached(url: string, expected: string) {
 
 async function platformPackage(api: string) {
   const catalog = await text(sdkIndex);
-  const paths = new Set([`platforms;android-${api}`, `platforms;android-${api}.0`]);
+  const [major, minor = "0"] = api.split(".");
+  // 37.0+ is published as android-<major>.<minor>; older majors drop a zero minor.
+  const dir = Number(major) < 37 && minor === "0" ? `android-${major}` : `android-${major}.${minor}`;
+  const paths = new Set([`platforms;${dir}`]);
   for (const [, path, body] of catalog.matchAll(/<remotePackage\s+[^>]*path="([^"]+)"[^>]*>([\s\S]*?)<\/remotePackage>/g)) {
     if (!paths.has(path)) continue;
     const file = body.match(/<complete>[\s\S]*?<url>([^<]+)<\/url>/)?.[1];

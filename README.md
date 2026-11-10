@@ -6,27 +6,15 @@ These jars are useful when an Android app needs to compile against framework sym
 
 ## Usage
 
-### Replace `android.jar` manually
+### Use the Bun CLI
 
-1. Pick the jar matching your `compileSdk`: `sdks/android-37.jar` for 37.0, `sdks/android-37.1.jar` for 37.1.
-2. Back up the official SDK jar. Platform directories are named `android-<major>` up to API 36 and `android-<major>.<minor>` from API 37 on:
-
-   ```text
-   $ANDROID_SDK/platforms/android-37.0/android.jar
-   ```
-
-3. Replace it with the matching jar from this repository.
-
-### Use the Gradle helper
-
-1. Put `unseal.gradle` in your project and add `apply from: 'unseal.gradle'` to the `build.gradle`.
-2. Set `version` at the top of `unseal.gradle` to the SDK you want, for example `"37.0"` or `"37.1"`.
-3. Run the `unseal` task to install the unsealed jar.
-4. Run the `restore` task when you want to put the official SDK jar back.
+1. Run `bun ls` to list the installed SDK platforms and their states.
+2. Run `bun unseal 37.0` to install the unsealed jar (downloads it on the first run).
+3. Run `bun restore 37.0` when you want to put the official SDK jar back.
+4. Run `bun purge 37.0` to also delete the unsealed jar and the official backup.
+5. Run `bun man` for the full command reference.
 
 The SDK is located through `ANDROID_HOME` (with `ANDROID_SDK_ROOT` as fallback).
-
-![Run `unseal` and `restore` from the Android Studio gutter](./art/run-from-gutter.png)
 
 ## Notes
 
