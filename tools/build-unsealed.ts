@@ -27,11 +27,22 @@ if (!api) {
   process.exit(2);
 }
 const [major, minor = 0] = api.split(".").map(Number);
-if (!Number.isInteger(major) || major < 37 || !Number.isInteger(minor) || minor < 0) {
-  throw new Error(`API ${api} is not supported: this pipeline builds API 37 and later (minor allowed, e.g. 37.1); jars for 36 and earlier are kept as-is`);
+if (!Number.isInteger(major) || !Number.isInteger(minor) || minor < 0) {
+  throw new Error(`API ${api} is not supported: expected digits with an optional minor, e.g. 36, 36.1, 37.0, 37.1`);
 }
-// Platform directories keep the minor from 37 on (android-37.0), so the jar does too.
-const name = `${major}.${minor}`;
+// Strict version form: 36 and earlier use "36" or a real minor like "36.1" (an explicit ".0"
+// is rejected — Google never published a 36.0 platform); 37 and later must name the minor
+// explicitly (bare "37" is rejected). Platform directories and jar names follow the same rule.
+if (major < 37 && minor === 0 && api.includes(".")) {
+  throw new Error(`API ${api}: API ${major} and earlier do not take an explicit zero minor; pass "${major}"`);
+}
+if (major >= 37 && !api.includes(".")) {
+  throw new Error(`API ${api}: API ${major} and later must name the minor explicitly, e.g. "${major}.0"`);
+}
+if (!releases[major]) {
+  throw new Error(`API ${api}: no Android release known for major ${major}; extend the releases table`);
+}
+const name = api;
 
 const output = resolve(values.out ?? `sdks/android-${name}.jar`);
 const cache = resolve(".unsealed-sdk/cache");

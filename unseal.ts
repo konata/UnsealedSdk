@@ -73,6 +73,10 @@ const requirePlatform = (version?: string): Platform => {
     console.error(`invalid version "${version}": expected digits with an optional minor, e.g. 36, 36.1, 37.0, 37.1`);
     process.exit(1);
   }
+  if (minor === "0" && Number(major) < 37) {
+    console.error(`invalid version "${version}": API ${major} and earlier do not take an explicit zero minor; pass "${major}"`);
+    process.exit(1);
+  }
   if (minor === undefined && Number(major) >= 37) {
     console.error(`invalid version "${version}": API ${major} and later must name the minor explicitly, e.g. "${major}.0"`);
     process.exit(1);

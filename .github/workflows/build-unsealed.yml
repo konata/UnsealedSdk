@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       api:
-        description: SDK API level, 37 or later (minor allowed), for example 37 or 37.1
+        description: SDK API level, e.g. 36, 36.1, 37.0, 37.1 (36 takes no zero minor; 37+ requires one)
         required: true
         type: string
       android_all:
@@ -42,13 +42,20 @@ jobs:
         run: |
           major="${API%%.*}"
           minor="${API#*.}"
-          [ "$minor" = "$API" ] && minor=0
-          if ! [ "$major" -ge 37 ] 2>/dev/null; then
-            echo "::error::api '$API' is not supported: this pipeline builds API 37 and later; jars for 36 and earlier are kept as-is"
+          has_minor=1; [ "$minor" = "$API" ] && { minor=0; has_minor=0; }
+          case "$major" in (*[!0-9]*|"") echo "::error::api '$API' is not a number"; exit 1;; esac
+          case "$minor" in (*[!0-9]*|"") echo "::error::api '$API' has a non-numeric minor"; exit 1;; esac
+          # Strict version form: 36 and earlier use "36" or a real minor like "36.1" (explicit ".0"
+          # is rejected — Google never published such a platform); 37 and later must name the minor.
+          if [ "$major" -lt 37 ] && [ "$has_minor" = 1 ] && [ "$minor" = 0 ]; then
+            echo "::error::api '$API': API $major and earlier do not take an explicit zero minor; pass '$major'"
             exit 1
           fi
-          # 37.0 and later keep the minor in the jar name, matching the platform directory.
-          echo "name=${major}.${minor}" >> "$GITHUB_ENV"
+          if [ "$major" -ge 37 ] && [ "$has_minor" = 0 ]; then
+            echo "::error::api '$API': API $major and later must name the minor explicitly, e.g. '$major.0'"
+            exit 1
+          fi
+          echo "name=$API" >> "$GITHUB_ENV"
 
       - run: mkdir -p sdks
 
