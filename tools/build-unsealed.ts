@@ -326,13 +326,14 @@ function supplementMembers(target: Uint8Array, source: Uint8Array) {
       return { table, end: cursor };
     };
     const section = (at: number) => {
-      const members: { access: number; name: number; descriptor: number; key: string; attrs: { name: string; nameIndex: number; at: number }[] }[] = [];
+      const members: { access: number; name: number; descriptor: number; key: string; at: number; end: number; attrs: { name: string; nameIndex: number; at: number }[] }[] = [];
       let cursor = at + 2;
       for (let left = u2(at); left > 0; left--) {
+        const start = cursor;
         const { table, end } = attributes(cursor + 6);
         members.push({
           access: u2(cursor), name: u2(cursor + 2), descriptor: u2(cursor + 4),
-          key: `${utf(u2(cursor + 2))}:${utf(u2(cursor + 4))}`, attrs: table,
+          key: `${utf(u2(cursor + 2))}:${utf(u2(cursor + 4))}`, at: start, end, attrs: table,
         });
         cursor = end;
       }
@@ -457,14 +458,27 @@ function supplementMembers(target: Uint8Array, source: Uint8Array) {
   };
 
   const targetFields = new Set(to.fields.members.map(member => member.key));
-  const targetMethods = new Set(to.methods.members.map(member => member.key));
   const addedFields = from.fields.members.filter(member => !targetFields.has(member.key));
-  const addedMethods = from.methods.members.filter(member => !targetMethods.has(member.key));
+
+  // javac resolves overloads by name + parameter types alone, so an official method
+  // that differs from a target method only in return type must replace it, not join it.
+  const signature = (key: string) => key.slice(0, key.indexOf(")") + 1);
+  const exact = new Set(to.methods.members.map(member => member.key));
+  const bySignature = new Map(to.methods.members.map(member => [signature(member.key), member]));
+  const replaced = new Set<Member>();
+  const addedMethods: Member[] = [];
+  for (const member of from.methods.members) {
+    if (exact.has(member.key)) continue;
+    const clash = bySignature.get(signature(member.key));
+    if (clash) replaced.add(clash);
+    addedMethods.push(member);
+  }
   const added = addedFields.length + addedMethods.length;
   if (added === 0) return { merged: target, added };
 
   const fieldBytes = addedFields.map(member => memberBytes(member, false));
   const methodBytes = addedMethods.map(member => memberBytes(member, true));
+  const kept = to.methods.members.filter(member => !replaced.has(member));
   const merged = Buffer.concat([
     Uint8Array.from([...target.subarray(0, 8), ...be(next)]),
     target.subarray(10, to.poolEnd),
@@ -473,8 +487,8 @@ function supplementMembers(target: Uint8Array, source: Uint8Array) {
     Uint8Array.from(be(to.fields.members.length + addedFields.length)),
     target.subarray(to.fieldsAt + 2, to.fields.end),
     ...fieldBytes.map(bytes => Uint8Array.from(bytes)),
-    Uint8Array.from(be(to.methods.members.length + addedMethods.length)),
-    target.subarray(to.methodsAt + 2, to.methods.end),
+    Uint8Array.from(be(kept.length + addedMethods.length)),
+    ...kept.map(member => target.subarray(member.at, member.end)),
     ...methodBytes.map(bytes => Uint8Array.from(bytes)),
     target.subarray(to.methods.end),
   ]);
