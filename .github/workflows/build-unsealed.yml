@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           filter: blob:none
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -86,4 +86,27 @@ jobs:
           git config user.email "beriru@qq.com"
           git add "sdks/android-${{ env.name }}.jar"
           git commit -m "feat: android-${{ env.name }} unsealed sdk"
-          git push
+
+          # Runs for other APIs may have pushed since checkout. Each run touches only its own jar, so
+          # replaying this commit onto the new tip is conflict-free; on a lost race, back off and retry.
+          branch="$GITHUB_REF_NAME"
+          for attempt in 1 2 3 4 5; do
+            if [ "$attempt" -gt 1 ]; then
+              sleep $((attempt * 5 + RANDOM % 5))
+            fi
+            if ! git fetch origin "$branch"; then
+              echo "attempt $attempt: fetch failed"
+            elif ! git rebase "origin/$branch"; then
+              git rebase --abort || true
+              echo "attempt $attempt: rebase failed"
+            elif [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ]; then
+              echo "::notice::$branch already has this sdks/android-${{ env.name }}.jar; nothing to push"
+              exit 0
+            elif git push origin "HEAD:$branch"; then
+              exit 0
+            else
+              echo "attempt $attempt: push rejected"
+            fi
+          done
+          echo "::error::could not push sdks/android-${{ env.name }}.jar to $branch after 5 attempts"
+          exit 1
