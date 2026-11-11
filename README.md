@@ -6,13 +6,21 @@ These jars are useful when an Android app needs to compile against framework sym
 
 ## Usage
 
-### Use the Bun CLI
+### Install from npm
 
-1. Run `bun ls` to list the installed SDK platforms and their states.
-2. Run `bun unseal 37.0` to install the unsealed jar (downloads it on the first run).
-3. Run `bun restore 37.0` when you want to put the official SDK jar back.
-4. Run `bun purge 37.0` to also delete the unsealed jar and the official backup.
-5. Run `bun man` for the full command reference.
+The CLI is a Bun script, so [Bun](https://bun.sh) must be on your `PATH`.
+
+```sh
+npm install -g @beriru/unseal
+```
+
+1. Run `unseal ls` to list the installed SDK platforms and their states.
+2. Run `unseal unseal 37.0` to install the unsealed jar (downloads it on the first run).
+3. Run `unseal restore 37.0` when you want to put the official SDK jar back.
+4. Run `unseal purge 37.0` to also delete the unsealed jar and the official backup.
+5. Run `unseal man` for the full command reference.
+
+From a checkout of this repository, the same commands are available as `bun ls`, `bun unseal 37.0`, `bun restore 37.0`, `bun purge 37.0`, and `bun man`.
 
 The SDK is located through `ANDROID_HOME` (with `ANDROID_SDK_ROOT` as fallback).
 
