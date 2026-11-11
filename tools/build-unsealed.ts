@@ -18,7 +18,11 @@ const runtime = ["java/", "javax/"];
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const accessFlags = { static: 0x0008, native: 0x0100, abstract: 0x0400 } as const;
+const accessFlags = { static: 0x0008, bridge: 0x0040, native: 0x0100, abstract: 0x0400 } as const;
+// Constant-pool tags: leaves (Utf8, Integer, Float, Long, Double) carry their value inline; references
+// (Class, String, Field/Method/InterfaceMethod refs, NameAndType, MethodType) hold only u2 pool indexes.
+const leafConstants = new Set([1, 3, 4, 5, 6]);
+const referenceConstants = new Set([7, 8, 9, 10, 11, 12, 16]);
 
 const { positionals: [api], values: { "android-all": androidAllOption, out: outputOption } } = parseArgs({
   args: Bun.argv.slice(2),
@@ -87,8 +91,9 @@ for (const entry of overlayClasses) {
 }
 
 // android-all has no minor builds, so what a minor release adds exists only in the official jar:
-// classes android-all lacks are filled from it whole, and members it added to existing classes are
-// appended to the android-all versions. Both stay at stub level, which is all a minor release adds.
+// classes android-all lacks are filled from it whole, and the linkable surface it added to existing
+// classes (members and InnerClasses entries) is merged into the android-all versions. Both stay at
+// stub level, which is all a minor release adds.
 if (minor > 0) {
   await $`unzip -oq ${official} '*.class' -d ${supplement}`;
   const officialClasses = (await readdir(supplement, { recursive: true }))
@@ -96,6 +101,7 @@ if (minor > 0) {
   let newClasses = 0;
   let patchedClasses = 0;
   let newMembers = 0;
+  let newInnerClasses = 0;
   for (const entry of officialClasses) {
     const target = Bun.file(join(merge, entry));
     const source = await Bun.file(join(supplement, entry)).bytes();
@@ -105,17 +111,18 @@ if (minor > 0) {
       continue;
     }
     try {
-      const { merged, added } = supplementMembers(await target.bytes(), source);
-      if (added === 0) continue;
+      const { merged, members, innerClasses } = supplementClass(await target.bytes(), source);
+      if (members + innerClasses === 0) continue;
       await Bun.write(target, merged);
       patchedClasses++;
-      newMembers += added;
+      newMembers += members;
+      newInnerClasses += innerClasses;
     } catch (cause) {
       throw new Error(`cannot supplement ${entry}`, { cause });
     }
   }
   console.log(`supplement ${newClasses} classes new in ${api} from the official jar (stub level only)`);
-  console.log(`supplement ${newMembers} members in ${patchedClasses} existing classes from the official jar`);
+  console.log(`supplement ${newMembers} members and ${newInnerClasses} InnerClasses entries in ${patchedClasses} existing classes from the official jar`);
 }
 
 await rm(output, { force: true });
@@ -234,75 +241,86 @@ function stub(input: Uint8Array) {
   ]);
 }
 
-// Adds every field and method the source class declares but the target class lacks. Source constant
-// pool indices are remapped by appending equivalent entries to the target pool, so every existing
-// index stays valid. Appended methods get the stub body stub() writes; appended members keep only
-// the attributes a signature needs (ConstantValue, Exceptions, Signature, MethodParameters,
-// Deprecated, Synthetic) — annotations do not survive the move.
-function supplementMembers(target: Uint8Array, source: Uint8Array) {
+// Merges the official class's linkable surface into the target: fields, methods, and InnerClasses entries
+// (javac finds a nested type, or the flags of one a signature mentions, only through them). Where Java source
+// cannot overload, the official form wins: a field replaces any target field of its name, and a non-bridge
+// method replaces the non-bridge method with its name and parameter list; bridges are never replaced and
+// never replace. Official constants are copied into the target pool append-only, so every existing index
+// stays valid. Added methods get the stub body stub() writes; added members keep only the attributes a
+// signature needs (ConstantValue, Exceptions, Signature, MethodParameters, Deprecated, Synthetic).
+function supplementClass(target: Uint8Array, source: Uint8Array) {
   const base = parseClass(target);
   const official = parseClass(source);
-
-  const existingFields = new Set(base.fields.members.map(field => field.key));
-  const addedFields = official.fields.members.filter(field => !existingFields.has(field.key));
-
-  // javac resolves overloads by name + parameter types alone, so an official method
-  // that differs from a base method only in return type must replace it, not join it.
-  const overloadKey = (key: string) => key.slice(0, key.indexOf(")") + 1);
-  const exactMethods = new Set(base.methods.members.map(method => method.key));
-  const byOverload = new Map(base.methods.members.map(method => [overloadKey(method.key), method]));
-  const replaced = new Set<ClassMember>();
-  const addedMethods: ClassMember[] = [];
-  for (const method of official.methods.members) {
-    if (exactMethods.has(method.key)) continue;
-    const clash = byOverload.get(overloadKey(method.key));
-    if (clash) replaced.add(clash);
-    addedMethods.push(method);
-  }
-  const added = addedFields.length + addedMethods.length;
-  if (added === 0) return { merged: target, added };
-
-  const writer = poolWriter(base);
-  const remap = (index: number): number => {
-    const offset = official.offsets[index];
-    const tag = source[offset];
-    switch (tag) {
-      case 1: return writer.utf8(official.stringAt(index));
-      case 3: case 4: return writer.intern(`${tag}:${official.uint32(offset + 1)}`, [...source.subarray(offset, offset + 5)]);
-      case 5: case 6: return writer.intern(`${tag}:${official.uint32(offset + 1)}:${official.uint32(offset + 5)}`, [...source.subarray(offset, offset + 9)], 2);
-      case 7: return writer.classRef(official.stringAt(official.uint16(offset + 1)));
-      case 8: return writer.stringRef(official.stringAt(official.uint16(offset + 1)));
-      case 12: {
-        const name = writer.utf8(official.stringAt(official.uint16(offset + 1)));
-        const descriptor = writer.utf8(official.stringAt(official.uint16(offset + 3)));
-        return writer.intern(`12:${name}:${descriptor}`, [12, ...bytes16(name), ...bytes16(descriptor)]);
-      }
-      default: throw new Error(`cannot remap constant tag ${tag}`);
-    }
+  const isBridge = ({ access }: ClassMember) => (access & accessFlags.bridge) !== 0;
+  const nestedOf = (parsed: ParsedClass) => {
+    const attribute = parsed.attributes.find(({ name }) => name === "InnerClasses");
+    const entries = Array.from({ length: attribute ? parsed.uint16(attribute.at + 6) : 0 }, (_, index) => {
+      const at = attribute!.at + 8 + 8 * index;
+      return { at, name: parsed.stringAt(parsed.uint16(parsed.offsets[parsed.uint16(at)] + 1)) };
+    });
+    return { attribute, entries };
   };
 
-  const carryAttribute = (attribute: ClassAttribute): number[] | undefined => {
-    const name = writer.utf8(attribute.name);
-    const bodyAt = attribute.at + 6;
-    switch (attribute.name) {
+  const fieldKeys = new Set(base.fields.members.map(field => field.key));
+  const addedFields = official.fields.members.filter(field => !fieldKeys.has(field.key));
+  const retyped = new Set(addedFields.map(field => field.name));
+  const keptFields = base.fields.members.filter(field => !retyped.has(field.name));
+
+  const overloadKey = ({ key }: ClassMember) => key.slice(0, key.indexOf(")") + 1);
+  const methodKeys = new Set(base.methods.members.map(method => method.key));
+  const realMethods = new Map(base.methods.members.filter(method => !isBridge(method)).map(method => [overloadKey(method), method]));
+  const addedMethods = official.methods.members.filter(method => !methodKeys.has(method.key));
+  const replaced = new Set(addedMethods.filter(method => !isBridge(method)).flatMap(method => realMethods.get(overloadKey(method)) ?? []));
+  const keptMethods = base.methods.members.filter(method => !replaced.has(method));
+
+  const baseNested = nestedOf(base);
+  const officialNested = nestedOf(official);
+  const nestedNames = new Set(baseNested.entries.map(({ name }) => name));
+  const addedNested = officialNested.entries.filter(({ name }) => !nestedNames.has(name));
+
+  const members = addedFields.length + addedMethods.length;
+  if (members + addedNested.length === 0) return { merged: target, members, innerClasses: 0 };
+
+  const writer = poolWriter(base);
+  // Leaf constants are copied byte for byte; reference constants are rebuilt from their remapped operands.
+  const remap = (index: number): number => {
+    if (index === 0) return 0;
+    const entry = official.entries[index];
+    const [tag] = entry;
+    if (leafConstants.has(tag)) return writer.intern(entry);
+    if (!referenceConstants.has(tag)) throw new Error(`cannot remap constant tag ${tag}`);
+    const operands = Array.from({ length: (entry.length - 1) / 2 }, (_, slot) => remap((entry[1 + 2 * slot] << 8) | entry[2 + 2 * slot]));
+    return writer.intern(Uint8Array.of(tag, ...operands.flatMap(bytes16)));
+  };
+
+  // The name is remapped only for attributes that are carried, before their payload, so a dropped
+  // attribute leaves nothing behind in the pool.
+  const carryAttribute = ({ name, at }: ClassAttribute): number[] | undefined => {
+    const body = at + 6;
+    const carry = (payload: () => number[]) => {
+      const nameIndex = remap(official.uint16(at));
+      const bytes = payload();
+      return [...bytes16(nameIndex), ...bytes32(bytes.length), ...bytes];
+    };
+    switch (name) {
       case "ConstantValue":
       case "Signature":
-        return [...bytes16(name), ...bytes32(2), ...bytes16(remap(official.uint16(bodyAt)))];
-      case "Exceptions": {
-        const exceptions = Array.from({ length: official.uint16(bodyAt) }, (_, index) => remap(official.uint16(bodyAt + 2 + 2 * index)));
-        return [...bytes16(name), ...bytes32(2 + 2 * exceptions.length), ...bytes16(exceptions.length), ...exceptions.flatMap(bytes16)];
-      }
-      case "MethodParameters": {
-        const count = source[bodyAt];
-        const parameters = Array.from({ length: count }, (_, index) => {
-          const parameter = official.uint16(bodyAt + 1 + 4 * index);
-          return [...bytes16(parameter === 0 ? 0 : remap(parameter)), ...bytes16(official.uint16(bodyAt + 3 + 4 * index))];
-        }).flat();
-        return [...bytes16(name), ...bytes32(1 + 4 * count), count, ...parameters];
-      }
+        return carry(() => bytes16(remap(official.uint16(body))));
+      case "Exceptions":
+        return carry(() => {
+          const count = official.uint16(body);
+          return [...bytes16(count), ...Array.from({ length: count }, (_, index) => bytes16(remap(official.uint16(body + 2 + 2 * index)))).flat()];
+        });
+      case "MethodParameters":
+        return carry(() => {
+          const count = source[body];
+          return [count, ...Array.from({ length: count }, (_, index) => [
+            ...bytes16(remap(official.uint16(body + 1 + 4 * index))), ...bytes16(official.uint16(body + 3 + 4 * index)),
+          ]).flat()];
+        });
       case "Deprecated":
       case "Synthetic":
-        return [...bytes16(name), ...bytes32(0)];
+        return carry(() => []);
       default:
         return undefined;
     }
@@ -321,21 +339,38 @@ function supplementMembers(target: Uint8Array, source: Uint8Array) {
 
   const encodedFields = addedFields.map(field => encodeMember(field, false));
   const encodedMethods = addedMethods.map(method => encodeMember(method, true));
-  const keptMethods = base.methods.members.filter(method => !replaced.has(method));
+  const classAttributes = base.attributes.map(({ at, end }) => target.subarray(at, end));
+  if (addedNested.length) {
+    const encodedNested = addedNested.flatMap(({ at }) => [
+      ...bytes16(remap(official.uint16(at))), ...bytes16(remap(official.uint16(at + 2))),
+      ...bytes16(remap(official.uint16(at + 4))), ...bytes16(official.uint16(at + 6)),
+    ]);
+    const existing = baseNested.attribute;
+    const entryCount = baseNested.entries.length + addedNested.length;
+    const attribute = Uint8Array.from([
+      ...bytes16(existing ? base.uint16(existing.at) : remap(official.uint16(officialNested.attribute!.at))),
+      ...bytes32(2 + 8 * entryCount), ...bytes16(entryCount),
+      ...(existing ? target.subarray(existing.at + 8, existing.end) : []), ...encodedNested,
+    ]);
+    if (existing) classAttributes[base.attributes.indexOf(existing)] = attribute;
+    else classAttributes.push(attribute);
+  }
+
   const merged = Buffer.concat([
     Uint8Array.from([...target.subarray(0, 8), ...bytes16(writer.count())]),
     target.subarray(10, base.poolEnd),
     Uint8Array.from(writer.appended),
     target.subarray(base.poolEnd, base.fields.at),
-    Uint8Array.from(bytes16(base.fields.members.length + encodedFields.length)),
-    target.subarray(base.fields.at + 2, base.fields.end),
+    Uint8Array.from(bytes16(keptFields.length + encodedFields.length)),
+    ...keptFields.map(({ at, end }) => target.subarray(at, end)),
     ...encodedFields,
     Uint8Array.from(bytes16(keptMethods.length + encodedMethods.length)),
     ...keptMethods.map(({ at, end }) => target.subarray(at, end)),
     ...encodedMethods,
-    target.subarray(base.methods.end),
+    Uint8Array.from(bytes16(classAttributes.length)),
+    ...classAttributes,
   ]);
-  return { merged, added };
+  return { merged, members, innerClasses: addedNested.length };
 }
 
 function parseClass(bytes: Uint8Array) {
@@ -348,12 +383,14 @@ function parseClass(bytes: Uint8Array) {
 
   const poolCount = uint16(8);
   const offsets: number[] = [];
+  const entries: Uint8Array[] = [];
   let poolEnd = 10;
   for (let index = 1; index < poolCount; index++) {
     const tag = bytes[poolEnd];
     const size = tag === 1 ? 2 + uint16(poolEnd + 1) : constantSizes[tag];
     if (size === undefined) throw new Error(`unknown constant tag ${tag} at #${index}`);
     offsets[index] = poolEnd;
+    entries[index] = bytes.subarray(poolEnd, poolEnd + 1 + size);
     poolEnd += 1 + size;
     if (tag === 5 || tag === 6) index++;
   }
@@ -390,42 +427,41 @@ function parseClass(bytes: Uint8Array) {
   const fields = readMembers(interfacesAt + 2 + 2 * uint16(interfacesAt));
   const methods = readMembers(fields.end);
   const attributes = readAttributes(methods.end).list;
-  return { bytes, uint16, uint32, poolCount, offsets, poolEnd, superClass, stringAt, fields, methods, attributes };
+  return { bytes, uint16, uint32, poolCount, offsets, entries, poolEnd, superClass, stringAt, fields, methods, attributes };
 }
 
 function poolWriter(parsed: ParsedClass) {
-  const { bytes, uint16, uint32, offsets, superClass, stringAt } = parsed;
+  const { entries, superClass } = parsed;
+  // A constant is identified by its exact serialized bytes, so lookups never depend on decoding.
   const known = new Map<string, number>();
-  offsets.forEach((offset, index) => {
-    const tag = bytes[offset];
-    const key = tag === 1 ? `1:${stringAt(index)}`
-      : tag === 3 || tag === 4 ? `${tag}:${uint32(offset + 1)}`
-      : tag === 5 || tag === 6 ? `${tag}:${uint32(offset + 1)}:${uint32(offset + 5)}`
-      : tag === 7 || tag === 8 ? `${tag}:${uint16(offset + 1)}`
-      : tag === 9 || tag === 10 || tag === 11 || tag === 12 ? `${tag}:${uint16(offset + 1)}:${uint16(offset + 3)}`
-      : undefined;
-    if (key && !known.has(key)) known.set(key, index);
+  entries.forEach((entry, index) => {
+    const key = entry.toHex();
+    if (!known.has(key)) known.set(key, index);
   });
 
   const appended: number[] = [];
   let count = parsed.poolCount;
-  const intern = (key: string, entry: number[], width = 1) => {
+  const intern = (entry: Uint8Array) => {
+    const key = entry.toHex();
     const existing = known.get(key);
     if (existing !== undefined) return existing;
+    const width = entry[0] === 5 || entry[0] === 6 ? 2 : 1;
     if (count + width > 0xffff) throw new Error("constant pool overflow");
     known.set(key, count);
     appended.push(...entry);
-    const assigned = count;
     count += width;
-    return assigned;
+    return count - width;
   };
-  const utf8 = (value: string) => intern(`1:${value}`, [1, ...bytes16(value.length), ...encoder.encode(value)]);
-  const classRef = (name: string) => { const index = utf8(name); return intern(`7:${index}`, [7, ...bytes16(index)]); };
-  const stringRef = (value: string) => { const index = utf8(value); return intern(`8:${index}`, [8, ...bytes16(index)]); };
+  // Only the stub template's fixed ASCII literals are built from text; everything else is copied as bytes.
+  const utf8 = (value: string) => {
+    const encoded = encoder.encode(value);
+    return intern(Uint8Array.of(1, ...bytes16(encoded.length), ...encoded));
+  };
+  const classRef = (name: string) => intern(Uint8Array.of(7, ...bytes16(utf8(name))));
+  const stringRef = (value: string) => intern(Uint8Array.of(8, ...bytes16(utf8(value))));
   const methodRef = (owner: number, name: string, descriptor: string) => {
-    const [nameIndex, descriptorIndex] = [utf8(name), utf8(descriptor)];
-    const signature = intern(`12:${nameIndex}:${descriptorIndex}`, [12, ...bytes16(nameIndex), ...bytes16(descriptorIndex)]);
-    return intern(`10:${owner}:${signature}`, [10, ...bytes16(owner), ...bytes16(signature)]);
+    const signature = intern(Uint8Array.of(12, ...bytes16(utf8(name)), ...bytes16(utf8(descriptor))));
+    return intern(Uint8Array.of(10, ...bytes16(owner), ...bytes16(signature)));
   };
 
   // new RuntimeException("Stub!"); athrow — constructors first call super() on the declared superclass.
@@ -451,7 +487,7 @@ function poolWriter(parsed: ParsedClass) {
     ];
   };
 
-  return { appended, count: () => count, intern, utf8, classRef, stringRef, stubCode };
+  return { appended, count: () => count, intern, stubCode };
 }
 
 function bytes16(value: number) {
