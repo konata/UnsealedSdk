@@ -1,158 +1,87 @@
 #!/usr/bin/env bun
 // Swap SDK platform android.jar between the official and unsealed builds.
-// The SDK is located through ANDROID_HOME (ANDROID_SDK_ROOT as fallback), the usual rule.
 
-import { copyFileSync, existsSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+const icons = { original: "  ", unsealed: "⚡", restored: "📦", chaos: "💀" } as const;
+type State = keyof typeof icons;
 type Platform = {
-  version: string; // "37" or "37.1"
-  dir: string;
+  version: string;
   jar: string;
   backup: string;
   unsealed: string;
-  remote: string;
-  state: "unsealed" | "restored" | "original" | "chaos";
+  state: State;
 };
 
-const home = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
-if (!home) {
-  console.error("ANDROID_HOME is not set");
-  process.exit(1);
-}
-const platformsDir = join(home, "platforms");
+const [, script = "unseal.ts", command = "man", target] = Bun.argv;
+const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
+if (!sdk) fail("ANDROID_HOME is not set");
+const platforms = join(sdk, "platforms");
 
-const sameFile = (a: string, b: string) => Bun.file(a).size === Bun.file(b).size;
-
-// Version form must match the platform directory exactly: "36" or "36.1" for 36 and earlier,
-// "37.0" or "37.1" from 37 on. Shorthands like "37" for "37.0" are rejected to stay unambiguous.
-const versionOf = (dir: string): string | null => /^android-(\d+(?:\.\d+)?)$/.exec(dir)?.[1] ?? null;
-
-const platform = (version: string): Platform | null => {
-  const [major, minor] = version.split(".");
-  if (!/^\d+$/.test(major ?? "") || (minor !== undefined && !/^\d+$/.test(minor))) return null;
-  if (minor === undefined && Number(major) >= 37) return null;
-  const dir = `android-${version}`;
-  const jar = join(platformsDir, dir, "android.jar");
-  if (!existsSync(jar)) return null;
-  const backup = join(jar, "..", "android.official.jar");
-  const unsealed = join(jar, "..", "android.unsealed.jar");
-  const downloaded = existsSync(unsealed) && statSync(unsealed).size > 0;
-  const state = !downloaded
-    ? "original"
-    : sameFile(jar, unsealed)
-      ? "unsealed"
-      : existsSync(backup) && sameFile(jar, backup)
-        ? "restored"
-        : "chaos";
-  return {
-    version,
-    dir,
-    jar,
-    backup,
-    unsealed,
-    remote: `android-${version}.jar`,
-    state,
-  };
-};
-
-const known = readdirSync(platformsDir)
-  .map(versionOf)
-  .filter((v): v is string => v !== null)
-  .map(platform)
-  .filter((p): p is Platform => p !== null)
-  .sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }));
-
-const requirePlatform = (version?: string): Platform => {
-  if (!version) {
-    console.error(`missing version, e.g. "bun unseal.ts ${process.argv[2]} 37.1"`);
-    process.exit(1);
-  }
-  const [major, minor] = version.split(".");
-  if (!/^\d+$/.test(major) || (minor !== undefined && !/^\d+$/.test(minor))) {
-    console.error(`invalid version "${version}": expected digits with an optional minor, e.g. 36, 36.1, 37.0, 37.1`);
-    process.exit(1);
-  }
-  if (minor === "0" && Number(major) < 37) {
-    console.error(`invalid version "${version}": API ${major} and earlier do not take an explicit zero minor; pass "${major}"`);
-    process.exit(1);
-  }
-  if (minor === undefined && Number(major) >= 37) {
-    console.error(`invalid version "${version}": API ${major} and later must name the minor explicitly, e.g. "${major}.0"`);
-    process.exit(1);
-  }
-  const p = platform(version);
-  if (!p) {
-    console.error(`no platform for ${version} at ${platformsDir}; install it in SDK Manager first`);
-    process.exit(1);
-  }
-  return p;
-};
-
-const swap = (from: string, to: string) => {
-  unlinkSync(to);
-  copyFileSync(from, to);
-};
-
-const icons = { original: "  ", unsealed: "⚡", restored: "📦", chaos: "💀" } as const;
-
-const commands: Record<string, (version?: string) => void> = {
+const commands: Record<string, () => Promise<void> | void> = {
   ls() {
-    const width = Math.max(...known.map((p) => p.version.length));
-    for (const p of known) console.log(`${icons[p.state]} ${p.version.padEnd(width)}  ${p.state}`);
+    const installed = readdirSync(platforms)
+      .map(entry => /^android-(.+)$/.exec(entry)?.[1])
+      .filter((version): version is string => version !== undefined && !versionError(version))
+      .map(platform)
+      .filter((found): found is Platform => found !== null)
+      .sort((left, right) => left.version.localeCompare(right.version, undefined, { numeric: true }));
+    const width = Math.max(...installed.map(({ version }) => version.length));
+    for (const { version, state } of installed) {
+      console.log(`${icons[state]} ${version.padEnd(width)}  ${state}`);
+    }
   },
 
-  async unseal(version) {
-    const p = requirePlatform(version);
-    if (p.state === "unsealed") {
-      console.log(`*** SDK ${p.version} is already unsealed ***`);
+  async unseal() {
+    const { version, jar, backup, unsealed, state } = requirePlatform(target);
+    if (state === "unsealed") {
+      console.log(`*** SDK ${version} is already unsealed ***`);
       return;
     }
-    if (!existsSync(p.backup)) {
-      copyFileSync(p.jar, p.backup);
-      console.log(`*** backed up official jar to ${p.backup} ***`);
+    if (!existsSync(backup)) {
+      copyFileSync(jar, backup);
+      console.log(`*** backed up official jar to ${backup} ***`);
     }
-    if (!existsSync(p.unsealed) || statSync(p.unsealed).size === 0) {
-      const url = `https://raw.githubusercontent.com/konata/UnsealedSdk/main/sdks/${p.remote}`;
+    if (Bun.file(unsealed).size === 0) {
+      const url = `https://raw.githubusercontent.com/konata/UnsealedSdk/main/sdks/android-${version}.jar`;
       console.log(`*** downloading ${url} ***`);
       const response = await fetch(url);
       if (!response.ok) throw new Error(`download failed: ${response.status} ${response.statusText}`);
-      const part = `${p.unsealed}.part`;
-      await Bun.write(part, response);
-      renameSync(part, p.unsealed);
+      const partial = `${unsealed}.part`;
+      await Bun.write(partial, response);
+      renameSync(partial, unsealed);
     }
-    swap(p.unsealed, p.jar);
-    console.log(`*** unsealed SDK ${p.version} installed ***`);
+    replaceJar(unsealed, jar);
+    console.log(`*** unsealed SDK ${version} installed ***`);
   },
 
-  restore(version) {
-    const p = requirePlatform(version);
-    if (p.state !== "unsealed") {
-      console.log(`*** SDK ${p.version} is ${p.state}, not unsealed; nothing to do ***`);
+  restore() {
+    const { version, jar, backup, state } = requirePlatform(target);
+    if (state !== "unsealed") {
+      console.log(`*** SDK ${version} is ${state}, not unsealed; nothing to do ***`);
       return;
     }
-    swap(p.backup, p.jar);
-    console.log(`*** official SDK ${p.version} restored ***`);
+    replaceJar(backup, jar);
+    console.log(`*** official SDK ${version} restored ***`);
   },
 
-  purge(version) {
-    const p = requirePlatform(version);
-    if (p.state === "unsealed") {
-      swap(p.backup, p.jar);
-      console.log(`*** official SDK ${p.version} restored ***`);
+  purge() {
+    const { version, jar, backup, unsealed, state } = requirePlatform(target);
+    if (state === "unsealed") {
+      replaceJar(backup, jar);
+      console.log(`*** official SDK ${version} restored ***`);
     }
-    for (const jar of [p.unsealed, p.backup]) {
-      if (existsSync(jar)) {
-        unlinkSync(jar);
-        console.log(`*** deleted ${jar} ***`);
-      }
+    for (const sidecar of [unsealed, backup]) {
+      if (!existsSync(sidecar)) continue;
+      unlinkSync(sidecar);
+      console.log(`*** deleted ${sidecar} ***`);
     }
-    console.log(`*** SDK ${p.version} is original now ***`);
+    console.log(`*** SDK ${version} is original now ***`);
   },
 
   man() {
-    const script = resolve(process.argv[1] ?? "unseal.ts");
-    console.log(`Usage: bun <command> [version]  (or: bun ${script} <command> [version])
+    console.log(`Usage: bun <command> [version]  (or: bun ${resolve(script)} <command> [version])
 
 Commands:
   ls                list installed SDK platforms and their states
@@ -171,11 +100,56 @@ The SDK is located through ANDROID_HOME (ANDROID_SDK_ROOT as fallback).`);
   },
 };
 
-const command = process.argv[2] ?? "man";
 const run = commands[command];
 if (!run) {
   console.error(`unknown command: ${command}`);
   commands.man();
   process.exit(1);
 }
-await run(process.argv[3]);
+await run();
+
+function fail(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
+// Version form must match the platform directory exactly: "36" or "36.1" for 36 and earlier,
+// "37.0" or "37.1" from 37 on. Shorthands like "37" for "37.0" are rejected to stay unambiguous.
+function versionError(version: string): string | null {
+  const [, major, minor] = /^([1-9]\d*)(?:\.(0|[1-9]\d*))?$/.exec(version) ?? [];
+  if (!major) return "expected digits with an optional minor, e.g. 36, 36.1, 37.0, 37.1";
+  if (Number(major) < 37 && minor === "0") {
+    return `API ${major} and earlier do not take an explicit zero minor; pass "${major}"`;
+  }
+  if (Number(major) >= 37 && minor === undefined) {
+    return `API ${major} and later must name the minor explicitly, e.g. "${major}.0"`;
+  }
+  return null;
+}
+
+function platform(version: string): Platform | null {
+  const directory = join(platforms, `android-${version}`);
+  const jar = join(directory, "android.jar");
+  if (!existsSync(jar)) return null;
+  const backup = join(directory, "android.official.jar");
+  const unsealed = join(directory, "android.unsealed.jar");
+  const jarSize = Bun.file(jar).size;
+  const unsealedSize = Bun.file(unsealed).size;
+  const state: State = unsealedSize === 0 ? "original"
+    : jarSize === unsealedSize ? "unsealed"
+    : existsSync(backup) && jarSize === Bun.file(backup).size ? "restored"
+    : "chaos";
+  return { version, jar, backup, unsealed, state };
+}
+
+function requirePlatform(version?: string): Platform {
+  if (!version) fail(`missing version, e.g. "bun unseal.ts ${command} 37.1"`);
+  const problem = versionError(version);
+  if (problem) fail(`invalid version "${version}": ${problem}`);
+  return platform(version) ?? fail(`no platform for ${version} at ${platforms}; install it in SDK Manager first`);
+}
+
+function replaceJar(source: string, destination: string) {
+  unlinkSync(destination);
+  copyFileSync(source, destination);
+}
