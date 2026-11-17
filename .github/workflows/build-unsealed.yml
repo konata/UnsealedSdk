@@ -31,11 +31,13 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             .github/workflows/build-unsealed.yml
-            tools/build-unsealed.ts
-            tools/StubNames.java
+            tools/*.scala
             sdks/
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: VirtusLab/scala-cli-setup@v1.12.5
+        with:
+          scala-cli-version: 1.9.1
+          jvm: temurin:21
 
       - name: Validate api
         env:
@@ -60,16 +62,11 @@ jobs:
 
       - run: mkdir -p sdks
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-
       - name: Build jar
         env:
           API: ${{ inputs.api }}
           ANDROID_ALL: ${{ inputs.android_all }}
-        run: bun run tools/build-unsealed.ts "$API" ${ANDROID_ALL:+--android-all "$ANDROID_ALL"} --out "sdks/android-$name.jar"
+        run: scala-cli run tools/build-unsealed.scala --server=false --runner=false -- "$API" ${ANDROID_ALL:+--android-all "$ANDROID_ALL"} --out "sdks/android-$name.jar"
 
       - name: Check GitHub file limit
         run: |

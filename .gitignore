@@ -1,3 +1,5 @@
 sdks/.DS_Store
 **/.DS_Store
 .unsealed-sdk/
+.scala-build/
+.bsp/
