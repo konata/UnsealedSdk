@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       android_all:
-        description: org.robolectric:android-all version, for example 17-robolectric-16653203 (default latest for the API)
+        description: org.robolectric:android-all version, for example 17-robolectric-16653203 (default pinned per API)
         required: false
         type: string
 
@@ -31,7 +31,7 @@ jobs:
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             .github/workflows/build-unsealed.yml
-            tools/*.scala
+            tools/build-unsealed.scala
             sdks/
 
       - uses: VirtusLab/scala-cli-setup@v1.12.5
