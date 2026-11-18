@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: unsealed-sdk-${{ inputs.api }}
+  group: unsealed-sdk-publish
   cancel-in-progress: false
 
 jobs:
@@ -78,38 +78,81 @@ jobs:
             exit 1
           fi
 
-      - name: Commit jar
+      - name: Publish jar
+        shell: bash
         run: |
-          if [ -z "$(git status --porcelain -- "sdks/android-${{ env.name }}.jar")" ]; then
-            echo "No jar changes"
-            exit 0
-          fi
-
           git config user.name "lolicon"
           git config user.email "beriru@qq.com"
-          git add "sdks/android-${{ env.name }}.jar"
-          git commit -m "feat: android-${{ env.name }} unsealed sdk"
+          jar="sdks/android-$name.jar"
+          built=$(git hash-object --no-filters "$jar")
 
-          # Runs for other APIs may have pushed since checkout. Each run touches only its own jar, so
-          # replaying this commit onto the new tip is conflict-free; on a lost race, back off and retry.
-          branch="$GITHUB_REF_NAME"
-          for attempt in 1 2 3 4 5; do
-            if [ "$attempt" -gt 1 ]; then
-              sleep $((attempt * 5 + RANDOM % 5))
-            fi
-            if ! git fetch origin "$branch"; then
-              echo "attempt $attempt: fetch failed"
-            elif ! git rebase "origin/$branch"; then
-              git rebase --abort || true
-              echo "attempt $attempt: rebase failed"
-            elif [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch")" ]; then
-              echo "::notice::$branch already has this sdks/android-${{ env.name }}.jar; nothing to push"
+          skip_identical() {
+            if [[ $(git rev-parse --verify --quiet "$1:$jar") == "$built" ]]; then
+              echo "::notice::main already has the built $jar"
               exit 0
-            elif git push origin "HEAD:$branch"; then
-              exit 0
-            else
-              echo "attempt $attempt: push rejected"
             fi
+          }
+
+          git fetch origin main
+          skip_identical FETCH_HEAD
+          cp -- "$jar" "$RUNNER_TEMP/built.jar"
+
+          # Keep the NUL-delimited diff paths in the current shell.
+          shopt -s lastpipe
+          sdk_jar='^sdks/android-[^/]*\.jar$'
+          for attempt in {1..5}; do
+            if ! git fetch origin main; then continue; fi
+            old_tip=$(git rev-parse FETCH_HEAD)
+            skip_identical "$old_tip"
+
+            code_tip=
+            while read -r commit; do
+              subject=$(git show -s --format=%s "$commit")
+              git diff-tree --root -m -r --no-renames --no-commit-id --name-only -z "$commit" |
+                sort -zu | mapfile -d '' -t paths
+              if [[ $subject == 'sdk: android-'* && ${#paths[@]} == 1 && ${paths[0]} =~ $sdk_jar ]]; then
+                continue
+              fi
+              for path in "${paths[@]}"; do
+                if [[ $path =~ ^sdks/[^/]*\.jar$ ]]; then
+                  echo "::error::Code commit $commit touches $path. Review the SDK history before publishing."
+                  exit 1
+                fi
+              done
+              code_tip=$commit
+              break
+            done < <(git rev-list "$old_tip")
+            if [[ -z $code_tip ]]; then
+              echo "::error::No code commit below the SDK jar block at $old_tip"
+              exit 1
+            fi
+
+            git reset --hard "$code_tip"
+            # A code-only change above an older jar block inherits jars without touching them.
+            inherited=$(git ls-files -- ':(glob)sdks/*.jar')
+            if [[ -n $inherited ]]; then
+              echo "::error::Code tip $code_tip already contains SDK jars. Move code below the jar block before publishing."
+              exit 1
+            fi
+
+            mkdir -p sdks
+            {
+              printf '%s\0' "$jar"
+              git ls-tree -rz --name-only "$old_tip" -- sdks/
+            } | LC_ALL=C sort -zV | uniq -z | while IFS= read -r -d '' path; do
+              [[ $path =~ $sdk_jar ]] || continue
+              if [[ $path == "$jar" ]]; then
+                cp -- "$RUNNER_TEMP/built.jar" "$path"
+              else
+                git checkout "$old_tip" -- "$path"
+              fi
+              version=${path#sdks/android-}
+              git add -- "$path"
+              git commit -m "sdk: android-${version%.jar}"
+            done
+
+            if git push --force-with-lease=main:"$old_tip" origin HEAD:main; then exit 0; fi
+            echo "::notice::Publish attempt $attempt for $jar was rejected. Refreshing main."
           done
-          echo "::error::could not push sdks/android-${{ env.name }}.jar to $branch after 5 attempts"
+          echo "::error::Could not publish $jar to main after 5 attempts"
           exit 1
