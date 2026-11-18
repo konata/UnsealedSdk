@@ -29,5 +29,5 @@ The SDK is located through `ANDROID_HOME` (with `ANDROID_SDK_ROOT` as fallback).
 - These jars are intended for compile-time and IDE usage. They do not bypass Android runtime hidden API enforcement.
 - Always keep a backup of the official SDK jar so the platform can be restored cleanly.
 - Only replace the SDK platform matching your project's `compileSdk`.
-- For API 37 and later, each jar combines the requested release’s public SDK surface with hidden APIs from the pinned android-all snapshot. Hidden APIs can differ between that snapshot and a minor release. Jars for API 36 and earlier are legacy builds.
+- Each jar combines the requested release’s public SDK surface with hidden APIs from the pinned android-all snapshot. Hidden APIs can differ between that snapshot and a minor release.
 - The `res/*.png` payloads are not included in the current pipeline's jars: linking only reads `resources.arsc` and resolves resource files on the device, so the PNG bytes are never used.
